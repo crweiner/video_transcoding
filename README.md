@@ -6,7 +6,7 @@ Tools to transcode, inspect and convert videos.
 
 Hi, I'm [Don Melton](http://donmelton.com/). I created these tools to transcode my collection of Blu-ray Discs and DVDs into a smaller, more portable format while remaining high enough quality to be mistaken for the originals.
 
-What makes these tools unique is the [special ratecontrol system](#explanation) which achieves those goals.
+What makes these tools unique are the [two ratecontrol systems](#explanation) which achieve those goals.
 
 This package is based on my original collection of [Video Transcoding Scripts](https://github.com/donmelton/video-transcoding-scripts) written in Bash. While still available online, those scripts are no longer in active development. Users are encouraged to install this Ruby Gem instead.
 
@@ -273,6 +273,8 @@ Use this command to treat any other additional audio tracks just like the main a
 Or use this command to make main audio output as a single track but still allow it in surround format:
 
     transcode-video --audio-width main=surround "/path/to/Movie.mkv"
+
+Please note that tracks transcoded to stereo AAC format, including the main track, are output in matrix-encoded [Dolby Pro Logic II](https://en.wikipedia.org/wiki/Dolby_Pro_Logic) surround format when the original input is multi-channel surround sound. This means that even though the AAC stereo track contains only two discrete channels, it can be decoded as multiple channels. So Dolby Digital AC-3 format is not actually required for surround sound output.
 
 If possible, audio is first passed through in its original format, providing that format is either AC-3 or AAC. This hardly ever works for Blu-ray Discs but it often will for DVDs and other random videos.
 
@@ -557,6 +559,22 @@ These examples are written in Bash and only supply crop values. But almost any s
 
 ## Explanation
 
+### A tale of two ratecontrol systems
+
+What is a ratecontrol sytem? It's how a video encoder decides on the amount of bits to allocate for a specific frame.
+
+My `transcode-video` tool has two different ratecontrol systems available to control the size and quality of output video. The special, or default, ratecontrol system is designed to deliver consistent quality, while the average bitrate (ABR) ratecontrol system, enabled via the `--abr` option, is designed to produce a predictable output size.
+
+Both ratecontrol systems are modified versions of what is commonly called a constrained variable bitrate (CVBR) mode. Which means they both allow bitrate to vary per frame but still constrain that bitrate.
+
+My special ratecontrol system leverages the constant quality ratecontrol system already within the x264 video encoder, an algorithm which uses a constant ratefactor (CRF) to target a specific quality instead of a bitrate.
+
+My average bitrate (ABR) ratecontrol system modifies the ABR algorithm already within x264 which targets a specific bitrate, constraining it to produce better overall quality.
+
+The target video bitrate for both systems is automatically determined by `transcode-video` using the resolution of the input. For example, the default target for 1080p output is `6000` Kbps, which is about one-fifth the video bitrate found on a typical Blu-ray Disc.
+
+While both systems deliver high quality, they sometimes have different visual characteristics.
+
 ### How my special ratecontrol system works
 
 When using `transcode-video`, you might notice two lines in the console output containing something like this:
@@ -565,16 +583,13 @@ When using `transcode-video`, you might notice two lines in the console output c
 options: vbv-maxrate=6000:vbv-bufsize=12000:crf-max=25:qpmax=34
 
 quality: 1.00 (RF)
-
 ```
 
 These are actually the settings used by my special ratecontrol system to configure the x264 video encoder within HandBrake.
 
-My system attempts to produce the highest possible video quality near a target bitrate. That target is automatically determined by `transcode-video` using the resolution of the input. For example, the default target for 1080p output is `6000` Kbps, which is about one-fifth the video bitrate found on a typical Blu-ray Disc.
+This system attempts to produce the highest possible video quality near a target bitrate using a constant ratefactor (CRF) to specify quality. A CRF is represented by a number from `0` to `51` with lower values indicating higher quality. The special value of `0` is for lossless output.
 
-The average bitrate (ABR) mode in x264 is normally used to target a specific bitrate. Instead, I leverage the constant quality ratecontrol system in x264. This algorithm uses a constant ratefactor (CRF) to target a specific quality instead of a bitrate. A CRF is represented by a number from `0` to `51` with lower values indicating higher quality. The special value of `0` is for lossless output.
-
-Unfortunately, the output bitrate is extremely unpredictable when using this CRF-based system. Typically, people pick a middle-level CRF value as their quality target and just hope for the best. This is what most of the presets built into HandBrake do, choosing a CRF of `20` or `22`.
+Unfortunately, the output bitrate is extremely unpredictable when using the x264's default CRF-based system. Typically, people pick a middle-level CRF value as their quality target and just hope for the best. This is what most of the presets built into HandBrake do, choosing a CRF of `20` or `22`.
 
 But such a strategy can result in output larger than its input or, worse, output too low in quality to be mistaken for that input.
 
@@ -598,7 +613,29 @@ There's a final change required for the VBV model. I need to set the VBV buffer 
 
 It's safe to set `vbv-bufsize` anywhere in the range from one half to twice that of `vbv-maxrate`. However, that larger `vbv-bufsize` value produces an output bitrate closest to, on average, that of the target. So, if `vbv-maxrate` is `6000` Kbps, then I set `vbv-bufsize` to `12000` Kbps.
 
-All these settings are essential for transcoding Blu-ray Discs and DVDs into a smaller, more portable format while remaining high enough quality to be mistaken for the originals. And `transcode-video` handles that configuration automatically for you.
+### How my average bitrate (ABR) ratecontrol system works
+
+When using `transcode-video` with the `--abr` option, you might notice two lines in the console output containing something like this:
+
+```
+options: vbv-maxrate=9000:vbv-bufsize=12000:nal-hrd=vbr
+
+bitrate: 6000 kbps, pass: 0
+```
+
+This ABR ratecontrol system attempts to produce a predictable output size while still maintaining high quality by manipulating the video buffering verifier (VBV) model within the x264 video encoder.
+
+As mentioned before, the VBV model typically allows bitrates to peak as high as `25000` Kbps during playback on most devices. But I constrain the VBV maximum bitrate (`vbv-maxrate`) to only 1.5 times that of the target, i.e. to just `9000` Kbps when the target bitrate is `6000` Kbps for 1080p output.
+
+It seems counterintuitive, but constraining the maximum bitrate prevents too much bitrate being wasted on complex or difficult to encode passages at the expense of quality elsewhere. This is because with an average bitrate algorithm, when the peaks get too high then the valleys get too low.
+
+As with the default ratecontrol system, I need to set the VBV buffer size (`vbv-bufsize`) so that my previous adjustment of `vbv-maxrate` won't be ignored by x264. So, if `vbv-maxrate` is `9000` Kbps, then I set `vbv-bufsize` to `12000` Kbps.
+
+This VBV model manipulation is exactly the same strategy used by streaming services such as Netflix.
+
+The final setting, `nal-hrd=vbr`, doesn't actually affect ratecontrol. This is a x264 option signaling Hypothetical Reference Decoder (HRD) information, meaning that it adds the VBV maximum bitrate value as metadata to the output video. Which is useful for certain streaming environments and media tools.
+
+And this information is safe to include since my ABR ratecontrol implementation will, by design, never exceed the maximum bitrate. Which is something the default ratecontrol system cannot promise.
 
 ## FAQ
 
@@ -632,14 +669,6 @@ Using hardware with [Intel Quick Sync Video](https://en.wikipedia.org/wiki/Intel
 
 Also, keep in mind that hardware encoders are typically designed for realtime video chat or other similar duties. To maintain that performance, they often take shortcuts with video quality like reducing reference frames, lowering subpixel motion estimation, etc. Such an approach is the equivalent of using the `veryfast` preset with a software encoder. That's fine for video chat but I wouldn't recommend it for transcoding your disc collection.
 
-### Can you add support for Enhanced AC-3 audio?
-
-[Dolby Digital Plus](https://en.wikipedia.org/wiki/Dolby_Digital_Plus) or Enhanced AC-3 is a successor to the Dolby Digital AC-3 audio format. AC-3 is the format currently output by `transcode-video` when surround audio is used as input. HandBrake has supported Enhanced AC-3 since version 1.0.0.
-
-The original AC-3 format is limited to 5.1 audio channels. This means that any 7.1 channel audio track, typically available on Blu-ray Discs, needs to be downmixed during transcoding. The advantage to Enhanced AC-3 is that it can support up to 13.1 audio channels, so no downmixing is necessary.
-
-Unfortunately, Enhanced AC-3 output is currently limited to 5.1 audio channels in HandBrake. I'll consider adding support once an Enhanced AC-3 feature without that limitation is available.
-
 ### How do you assess video transcoding quality?
 
 I compare by visual inspection. Always with the video in motion, never frame by frame. It's tedious but after years of practice I know which portions of which videos are problematic and difficult to transcode. And I look at those first.
@@ -649,8 +678,6 @@ In addition, I use the `query-handbrake-log` tool to report on `ratefactor`, the
 What I don't use are [peak signal-to-noise ratios](https://en.wikipedia.org/wiki/Peak_signal-to-noise_ratio) or a [structural similarity index](https://en.wikipedia.org/wiki/Structural_similarity) in an attempt to objectively compare quality. Although both metrics are available to the x264 encoder, enabling either of them ironically disables key psychovisual optimizations that improve quality.
 
 ### What options do you use with `transcode-video`?
-
-I use the default settings. That's why they're the defaults.
 
 I never use the `--crop detect` function of `transcode-video` because I don't trust either `HandBrakeCLI` or `ffmpeg` to always get it right without supervision. Instead, I use the separate `detect-crop` tool before transcoding to manually review and apply the best crop values.
 
@@ -662,9 +689,40 @@ For a few problematic videos, I have to apply options like `--force-rate 23.976 
 
 ## History
 
-Saturday, December 2, 2017
+### [0.20.0](https://github.com/donmelton/video_transcoding/releases/tag/0.20.0)
+
+Monday, June 18, 2018
+
+* Now require `HandBrakeCLI` version 1.0.0 or later. Not only does this change make for easier testing, but it allows removal of many capability-detection hacks needed to support older versions. My thanks again to all the users who provided positive feedback about this online!
+* Relax frame rate control in `transcode-video` so that the options `--rate=30` and `--pfr` are no longer passed to `HandBrakeCLI` for most non-DVD videos. This means that the peak frame rate will no longer be limited to `30` FPS, allowing camera-generated videos to retain their original frame rates. However, the old behavior can be restored for those videos by adding `--limit-rate 30` to your `transcode-video` command line.
+* Modify `transcode-video` to no longer pass `--encoder-preset=medium` to `HandBrakeCLI` since that's the default behavior anyway. However, adding `--preset medium` to your `transcode-video` command line still does so.
+* Modify `transcode-video` to no longer pass a named audio encoder to `HandBrakeCLI` in order to select AAC, i.e. `ca_aac` or `av_aac`, since AAC is the default audio format anyway. However, adding the `--aac-encoder` option to your `transcode-video` command line still allows an explicit choice.
+* Modify `transcode-video` to substitute "analyse" for the x264 option called "partitions" when invoked with the `--quick` or `--veryquick` options. This is done to better match the archaic internal name used by HandBrake. It has no effect on actual transcoding behavior.
+* Add `-n` as a shortcut alias for the `--dry-run` option in `transcode-video`. This is the same shortcut alias used in `rsync` and `make`.
+* Expand the "Explanation" section of the "README" document to describe both the special, or default, ratecontrol system and the average bitrate (ABR) ratecontrol system, enabled via the `--abr` option.
+* Add clarification to the "README" document that stereo AAC tracks can also include surround audio information in matrix-encoded Dolby Pro Logic II format.
+* Fix spelling of "suppress" in the `--help` output of `query-handbrake-log`. Thanks, [@chrisridd](https://github.com/chrisridd)! Via [ #205](https://github.com/donmelton/video_transcoding/pull/205).
+
+### [0.19.0](https://github.com/donmelton/video_transcoding/releases/tag/0.19.0)
+
+Saturday, January 27, 2018
+
+* Add support for [Dolby Digital Plus](https://en.wikipedia.org/wiki/Dolby_Digital_Plus) audio format, aka Enhanced AC-3, to `transcode-video` and `convert-video` with a new `--ac3-encoder` option for each tool. Also, extend the `--ac3-bitrate` and `--pass-ac3-bitrate` options in `transcode-video` to support higher bitrates, 768 and 1536 Kbps, available to Enhanced AC-3. Via [ #26](https://github.com/donmelton/video_transcoding/issues/26).
+    * WARNING: Dolby Digital Plus output is currently NOT COMPATIBLE with the MP4 file format when using `transcode-video` due to a limitation in `HandBrakeCLI`. This means that adding both `--mp4` and `--ac3-encoder eac3` to your command line will fail with the error "`incompatible encoder 'eac3' for muxer 'av_mp4'`."
+    * Oddly enough, `ffmpeg` doesn't have this limitation so you'll be able to use `convert-video --ac3-encoder eac3` to convert your MKV files into MP4 format without any problems. Go figure.
+* Remove "Can you add support for Enhanced AC-3 audio?" from the "FAQ" section of the "README" document, for obvious reasons. :)
+* Add `--reverse-double-order` option to `transcode-video` to reverse order of double-width audio output tracks. Thanks, [@samhutchins](https://github.com/samhutchins)! Via [ #184](https://github.com/donmelton/video_transcoding/pull/184).
+* Fix a bug in `convert-video` where the number of audio channels was wrong when tracks had to be transcoded. This was most noticeable for AAC output and appears due to a change in the behavior of `ffmpeg`.
+* Append `.inspect` to all Hash objects used as `Console.debug` arguments. Apparently a change in the way Ruby works was preventing these objects from being printed, although I'm unsure about the specific version of Ruby in which this occurred.
+* Remove superfluous quotes in the `--help` output of `transcode-video`.
+* Remove the deprecated `--cvbr` and `--vbr` options in `transcode-video` and `--player` option in `detect-crop`.
+* Revise my usage in the "FAQ" section of the "README" document since I no longer choose the default settings with `transcode-video`.
+* Re-order a few misplaced lines in the "History" section of the "README" document.
+* Update all copyright notices to the year 2018.
 
 ### [0.18.0](https://github.com/donmelton/video_transcoding/releases/tag/0.18.0)
+
+Saturday, December 2, 2017
 
 * Improve the average bitrate (ABR) ratecontrol system provided by the `--abr` option in `transcode-video`. Via [ #179](https://github.com/donmelton/video_transcoding/issues/179).
     * Implement it with a maximum bitrate constraint to raise its overal quality level and guarantee that it will not generate any `VBV underflow` warnings like the default ratecontrol system.
@@ -679,15 +737,15 @@ Saturday, December 2, 2017
 * Fix failure of subtitle detection for HandBrake nightly builds. Language detection for subtitles in disc image directory input and individual closed caption tracks may still be wrong but will not be fixed at this time. Via [ #172](https://github.com/donmelton/video_transcoding/issues/172).
 * Mention [Nick Wronski](https://github.com/nwronski)'s nifty batch-processing wrapper for `transcode-video` in the the "README" document. Thanks, [@JMoVS](https://github.com/JMoVS)! Via [ #180](https://github.com/donmelton/video_transcoding/pull/180).
 
-Sunday, September 10, 2017
-
 ### [0.17.4](https://github.com/donmelton/video_transcoding/releases/tag/0.17.4)
+
+Sunday, September 10, 2017
 
 * Force text output from `mp4track` into UTF-8 binary format to ensure correct parsing of that data. Thanks, [@DavidNielsen](https://github.com/DavidNielsen)! Via [ #152](https://github.com/donmelton/video_transcoding/pull/152).
 
-Sunday, May 14, 2017
-
 ### [0.17.3](https://github.com/donmelton/video_transcoding/releases/tag/0.17.3)
+
+Sunday, May 14, 2017
 
 * `HandBrakeCLI` versions 1.0 and later changed the default frame rate mode from "constant" to "peak-limited" when a rate is specified. This new behavior in `HandBrakeCLI` requires two significant changes in `transcode-video`:
     * Fix a bug where the `--force-rate` option failed to force a constant frame rate. This bug made it behave essentially the same at the `--limit-rate` option.

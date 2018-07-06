@@ -2,7 +2,7 @@
 #
 # convert-video
 #
-# Copyright (c) 2013-2017 Don Melton
+# Copyright (c) 2013-2018 Don Melton
 #
 
 $LOAD_PATH.unshift File.expand_path(File.dirname(__FILE__) + '/../lib')
@@ -34,6 +34,8 @@ Usage: #{$PROGRAM_NAME} [OPTION]... [FILE]...
     --use-m4v       use `.m4v` extension instead of `.mp4` for MP4 output
     --no-double     don't swap order of first two audio tracks
                       or add stereo copy of main surround track
+    --ac3-encoder ac3|eac3
+                    set AC-3 audio encoder (default: ac3)
 
 -v, --verbose       increase diagnostic information
 -q, --quiet         decrease     "           "
@@ -47,15 +49,25 @@ HERE
 
     def initialize
       super
-      @output   = nil
-      @use_m4v  = false
-      @double   = true
+      @output       = nil
+      @use_m4v      = false
+      @double       = true
+      @ac3_encoder  = 'ac3'
     end
 
     def define_options(opts)
       opts.on('-o', '--output ARG') { |arg| @output = arg }
       opts.on('--use-m4v')          { @use_m4v = true }
       opts.on('--no-double')        { @double = false }
+
+      opts.on '--ac3-encoder ARG' do |arg|
+        @ac3_encoder = case arg
+        when 'ac3', 'eac3'
+          arg
+        else
+          fail UsageError, "invalid AC-3 audio encoder: #{arg}"
+        end
+      end
     end
 
     def configure
@@ -72,7 +84,7 @@ HERE
     def process_input(arg)
       Console.info "Processing: #{arg}..."
       media = Media.new(path: arg, allow_directory: false)
-      Console.debug media.info
+      Console.debug media.info.inspect
       output = resolve_output(media)
       fail "no compatible video track: #{arg}" unless media.info[:h264] or media.info[:hevc]
       fail "no video stream: #{arg}" unless media.info.has_key? :stream
@@ -128,7 +140,7 @@ HERE
               '-map', "0:#{media.info[:audio][1][:stream]}"
             ])
             copy_options.concat([
-              '-ac', '2',
+              '-ac:a:0', '2',
               '-c:a:0', FFmpeg.aac_encoder,
               '-b:a:0', '160k'
             ])
@@ -142,17 +154,17 @@ HERE
           ])
 
           if  media.info[:audio][track][:channels] > 2.0 and
-              media.info[:audio][track][:format] != 'AC3'
+              not ac3_format?(media.info[:audio][track][:format])
             copy_options.concat([
-              '-ac', '6',
-              "-c:a:#{stream}", 'ac3',
+              "-ac:a:#{stream}", '6',
+              "-c:a:#{stream}", @ac3_encoder,
               "-b:a:#{stream}", '640k'
             ])
           elsif media.info[:audio][track][:channels] <= 2.0 and
                 media.info[:audio][track][:format] != 'AAC' and
-                media.info[:audio][track][:format] != 'AC3'
+                not ac3_format?(media.info[:audio][track][:format])
             copy_options.concat([
-              '-ac', '2',
+              "-ac:a:#{stream}", '2',
               "-c:a:#{stream}", FFmpeg.aac_encoder,
               "-b:a:#{stream}", '160k'
             ])
@@ -206,7 +218,7 @@ HERE
 
       convert media, output, ['-movflags', 'disable_chpl', *map_options, *copy_options]
       mp4_media = Media.new(path: output, allow_directory: false)
-      Console.debug mp4_media.info
+      Console.debug mp4_media.info.inspect
 
       last_track = 0
 
@@ -233,6 +245,15 @@ HERE
         end
 
         mp4_track_enable output, last_track + track, enabled
+      end
+    end
+
+    def ac3_format?(track_format)
+      if  (@ac3_encoder == 'ac3'  and track_format == 'AC3') or
+          (@ac3_encoder == 'eac3' and track_format =~ /^(?:E-)?AC3$/)
+        true
+      else
+        false
       end
     end
 
@@ -333,7 +354,7 @@ HERE
 
       convert media, output, [*map_options, *copy_options]
       mkv_media = Media.new(path: output, allow_directory: false)
-      Console.debug mkv_media.info
+      Console.debug mkv_media.info.inspect
       mkvpropedit_options = [
         '--tags', 'all:'
       ]
@@ -406,7 +427,7 @@ HERE
         *ffmpeg_options,
         output
       ]
-      Console.debug ffmpeg_command
+      Console.debug ffmpeg_command.inspect
       Console.info 'Converting with ffmpeg...'
 
       begin
